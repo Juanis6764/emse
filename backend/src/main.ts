@@ -40,7 +40,9 @@ async function bootstrap() {
     );
   }
   const port = Number(process.env.PORT || 3001);
-  await app.listen(port);
+  // Escuchar en todas las interfaces permite acceder desde otros equipos de
+  // la misma red local. El firewall de Windows sigue siendo la barrera de red.
+  await app.listen(port, '0.0.0.0');
   console.log(`Servidor NestJS: http://localhost:${port}`);
   if (process.env.NODE_ENV !== 'production')
     console.log(`Swagger: http://localhost:${port}/api/documentacion`);

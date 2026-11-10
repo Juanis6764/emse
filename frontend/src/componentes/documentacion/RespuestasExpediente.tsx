@@ -154,15 +154,18 @@ export default function RespuestasExpediente({
                 : observacionPendiente
                   ? "OBSERVADA"
                   : "EN REVISIÓN";
+            const esRespuestaFinalAprobada = estadoRevision === "APROBADA";
             return (
               <article
                 key={relacion.id_relacion}
-                className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                className={`rounded-2xl border p-4 ${esRespuestaFinalAprobada ? "border-sky-300 bg-sky-50" : "border-slate-200 bg-slate-50"}`}
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p className="text-xs font-bold uppercase text-[#52796f]">
-                      Respuesta {indice + 1} de {respuestas.length}
+                    <p className={`text-xs font-bold uppercase ${esRespuestaFinalAprobada ? "text-sky-700" : "text-[#52796f]"}`}>
+                      {esRespuestaFinalAprobada
+                        ? "Respuesta final aprobada"
+                        : `Respuesta ${indice + 1} de ${respuestas.length}`}
                     </p>
                     <h3 className="mt-1 font-mono text-base font-bold text-slate-950">
                       {respuesta.codigo_interno}
@@ -171,7 +174,7 @@ export default function RespuestasExpediente({
                       {respuesta.asunto}
                     </p>
                   </div>
-                  <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-slate-700 ring-1 ring-slate-200">
+                  <span className={`rounded-full px-3 py-1 text-xs font-bold ring-1 ${esRespuestaFinalAprobada ? "bg-sky-100 text-sky-800 ring-sky-300" : "bg-white text-slate-700 ring-slate-200"}`}>
                     {estadoRevision}
                   </span>
                 </div>

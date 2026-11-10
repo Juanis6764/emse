@@ -114,18 +114,19 @@ function textoResumenHistorico(resumen: EstadoResumenHistorico | undefined) {
   if (resumen === "ERROR") return "— Historial de plazos no disponible";
   if (resumen.total === 0) return "— SIN PLAZO";
 
-  const alertas: string[] = [];
+  const referenciasHistoricas: string[] = [];
   if (resumen.cumplidosTarde) {
-    alertas.push(
-      `${resumen.cumplidosTarde} ${resumen.cumplidosTarde === 1 ? "plazo cumplido" : "plazos cumplidos"} tarde`,
+    referenciasHistoricas.push(
+      `${resumen.cumplidosTarde} de ${resumen.total} ${resumen.cumplidosTarde === 1 ? "plazo atendido" : "plazos atendidos"} fuera de plazo`,
     );
   }
   if (resumen.vencidos) {
-    alertas.push(
-      `${resumen.vencidos} ${resumen.vencidos === 1 ? "plazo vencido" : "plazos vencidos"}`,
+    referenciasHistoricas.push(
+      `${resumen.vencidos} ${resumen.vencidos === 1 ? "plazo histórico sin constancia de atención" : "plazos históricos sin constancia de atención"}`,
     );
   }
-  if (alertas.length) return `⚠ ${alertas.join(" · ")}`;
+  if (referenciasHistoricas.length)
+    return `Historial: ${referenciasHistoricas.join(" · ")}`;
   if (
     resumen.indeterminables === 0 &&
     resumen.cumplidosEnPlazo === resumen.total
@@ -218,12 +219,8 @@ function CardDocumento({
   const cerrado = esDocumentoCerrado(documento);
   const visual = situacionPlazoVisual(documento.plazo_vigente, ahora);
   const resumenDisponible = esResumenHistorico(resumenHistorico);
-  const historicoConRetraso =
-    cerrado &&
-    resumenDisponible &&
-    (resumenHistorico.cumplidosTarde > 0 || resumenHistorico.vencidos > 0);
   const vencido = !cerrado && visual.clave === "VENCIDO";
-  const alerta = vencido || historicoConRetraso;
+  const alerta = vencido;
   const textoHistorico = cerrado
     ? textoResumenHistorico(resumenHistorico)
     : undefined;

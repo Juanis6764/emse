@@ -2,7 +2,12 @@ import axios from 'axios';
 
 // Se incorpora en el build de Next.js. En Vercel debe apuntar al servicio
 // público de Render, por ejemplo: https://emse-api.onrender.com
-const URL_API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// En la red local se usa el proxy de Next en el mismo origen; así el navegador
+// no debe alcanzar directamente el puerto interno del backend.
+const URL_API = process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window === 'undefined'
+    ? 'http://localhost:3001'
+    : '/api');
 
 const api = axios.create({
   baseURL: URL_API,

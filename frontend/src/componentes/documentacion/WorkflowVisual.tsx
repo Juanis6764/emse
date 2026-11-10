@@ -36,6 +36,16 @@ interface Etapa {
   };
 }
 
+interface Conexion {
+  id: string;
+  origen: number;
+  destino: number;
+  retorno: boolean;
+  enTransito: boolean;
+  fase: "IDA" | "CORRECCION" | "RETORNO";
+  cierre?: boolean;
+}
+
 function etiquetaSeccion(nombre?: string | null) {
   return nombre ? nombre.replace(/_/g, " ") : "—";
 }
@@ -100,6 +110,22 @@ function construirEtapas(trazabilidad: Trazabilidad, ahora: Date): Etapa[] {
   });
 
   for (const movimiento of expediente.movimientos ?? []) {
+    if (
+      movimiento.seccion_origen &&
+      !etapas.some((etapa) => etapa.idSeccion === movimiento.id_seccion_origen)
+    ) {
+      agregarEvento(
+        `origen-${movimiento.id_movimiento}`,
+        movimiento.seccion_origen,
+        movimiento.fecha_hora_envio,
+        {
+          accion: `${movimiento.tipo_movimiento}: enviado a ${etiquetaSeccion(movimiento.seccion_destino?.nombre)}`,
+          usuario: persona(movimiento.usuario_envia),
+          estado: "ENVIADO",
+          fechaEnvio: movimiento.fecha_hora_envio,
+        },
+      );
+    }
     agregarEvento(
       `movimiento-${movimiento.id_movimiento}`,
       movimiento.seccion_destino,
@@ -175,7 +201,14 @@ function construirEtapas(trazabilidad: Trazabilidad, ahora: Date): Etapa[] {
     ].includes(cambio.estado_nuevo)) continue;
     etapas.push({
       id: `estado-${cambio.id_historial}`,
-      idSeccion: cambio.seccion?.id_seccion,
+      // FINALIZADO y ARCHIVADO son cierres del expediente, no otra visita a
+      // RADIO ni a la sección que registró el cierre.
+      idSeccion:
+        cambio.estado_nuevo === "APROBADO"
+          ? cambio.seccion?.id_seccion
+          // Identificador visual exclusivo para poder enlazar el cierre sin
+          // convertirlo en otra visita a la sección que lo registró.
+          : -cambio.id_historial,
       nombre:
         cambio.estado_nuevo === "APROBADO"
           ? etiquetaSeccion(cambio.seccion?.nombre)
@@ -201,33 +234,65 @@ function construirEtapas(trazabilidad: Trazabilidad, ahora: Date): Etapa[] {
       new Date(a.fecha ?? 0).getTime() - new Date(b.fecha ?? 0).getTime(),
   );
 
+  // Una sección es un único nodo durante toda la vida del expediente. Los
+  // eventos posteriores actualizan su detalle, pero nunca crean una tarjeta
+  // duplicada al volver a esa misma sección.
+  const porSeccion = new Map<string, Etapa>();
+  for (const etapa of etapas) {
+    const clave = etapa.idSeccion ? `seccion-${etapa.idSeccion}` : etapa.id;
+    const existente = porSeccion.get(clave);
+    if (existente) {
+      existente.fecha = etapa.fecha;
+      existente.detalle = etapa.detalle;
+    } else {
+      porSeccion.set(clave, etapa);
+    }
+  }
+  const etapasUnicas = [...porSeccion.values()];
+
   const seccionActual = expediente.seccion_actual;
   const ultimoIndiceSeccion = ultimaPosicion(
-    etapas,
+    etapasUnicas,
     (etapa) => etapa.idSeccion === seccionActual?.id_seccion,
   );
   const indiceActual =
     expediente.estado_actual === "ARCHIVADO"
-      ? ultimaPosicion(etapas, (etapa) => etapa.nombre === "ARCHIVADO")
+      ? ultimaPosicion(etapasUnicas, (etapa) => etapa.nombre === "ARCHIVADO")
       : expediente.estado_actual === "FINALIZADO"
-        ? ultimaPosicion(etapas, (etapa) => etapa.nombre === "FINALIZADO")
+        ? ultimaPosicion(etapasUnicas, (etapa) => etapa.nombre === "FINALIZADO")
         : ultimoIndiceSeccion >= 0
           ? ultimoIndiceSeccion
-          : Math.max(0, etapas.length - 1);
+          : Math.max(0, etapasUnicas.length - 1);
 
   for (const plazo of trazabilidad.plazos ?? []) {
     const proveido = expediente.hoja_ruta?.proveidos?.find(
       (item) => item.id_proveido === plazo.id_proveido,
     );
-    const indice = indiceEtapaDelPlazo(etapas, plazo, proveido?.fecha_hora);
-    if (indice >= 0) etapas[indice].plazo = plazo;
+    const indice = indiceEtapaDelPlazo(etapasUnicas, plazo, proveido?.fecha_hora);
+    if (indice >= 0) etapasUnicas[indice].plazo = plazo;
   }
 
-  return etapas.map((etapa, indice) => {
+  // El único plazo que puede determinar el estado actual llega calculado por
+  // el backend. El historial permanece consultable, pero nunca puede volver
+  // rojo al nodo que representa la etapa actual.
+  const plazoVigente = trazabilidad.plazo_vigente;
+  if (indiceActual >= 0) {
+    etapasUnicas[indiceActual].plazo =
+      plazoVigente?.id_seccion_responsable === seccionActual?.id_seccion
+        ? (plazoVigente ?? undefined)
+        : undefined;
+  }
+
+  return etapasUnicas.map((etapa, indice) => {
     let estado: EstadoEtapa = indice < indiceActual ? "COMPLETADO" : "PENDIENTE";
     if (etapa.detalle.estado === "EN TRÁNSITO") estado = "EN_TRANSITO";
+    const esPlazoActivo =
+      indice === indiceActual &&
+      etapa.idSeccion === seccionActual?.id_seccion &&
+      etapa.plazo?.id_plazo === plazoVigente?.id_plazo &&
+      plazoVigente?.id_seccion_responsable === seccionActual?.id_seccion;
     const resultadoPlazo = etapa.plazo
-      ? situacionHistoricaPlazo(etapa.plazo, ahora, indice === indiceActual)
+      ? situacionHistoricaPlazo(etapa.plazo, ahora, esPlazoActivo)
       : undefined;
     if (indice === indiceActual) {
       estado =
@@ -251,6 +316,62 @@ function construirEtapas(trazabilidad: Trazabilidad, ahora: Date): Etapa[] {
     }
     return { ...etapa, estado, resultadoPlazo };
   });
+}
+
+function construirConexiones(trazabilidad: Trazabilidad): Conexion[] {
+  const fechaAprobacion = [...(trazabilidad.expediente?.historial ?? [])]
+    .filter((evento) => evento.estado_nuevo === "APROBADO")
+    .at(-1)?.fecha_hora;
+  const movimientos = [...(trazabilidad.expediente?.movimientos ?? [])].sort(
+    (a, b) =>
+      new Date(a.fecha_hora_envio).getTime() -
+      new Date(b.fecha_hora_envio).getTime(),
+  );
+  const conexiones: Conexion[] = [];
+  for (const movimiento of movimientos) {
+    const { id_seccion_origen: origen, id_seccion_destino: destino } = movimiento;
+    if (!origen || !destino || origen === destino) continue;
+    const esCorreccion =
+      movimiento.tipo_movimiento === "DEVOLUCION" ||
+      movimiento.tipo_movimiento === "REENVIO";
+    const esRetorno =
+      !esCorreccion &&
+      !!fechaAprobacion &&
+      new Date(movimiento.fecha_hora_envio) >= new Date(fechaAprobacion);
+    conexiones.push({
+      id: `conexion-${movimiento.id_movimiento}`,
+      origen,
+      destino,
+      retorno: esCorreccion,
+      enTransito: movimiento.estado_movimiento === "PENDIENTE",
+      fase: esCorreccion ? "CORRECCION" : esRetorno ? "RETORNO" : "IDA",
+    });
+  }
+  let origenCierre: number | null = null;
+  for (const cambio of trazabilidad.expediente?.historial ?? []) {
+    if (
+      !["FINALIZADO", "ARCHIVADO"].includes(cambio.estado_nuevo) ||
+      !cambio.seccion?.id_seccion
+    ) {
+      continue;
+    }
+    conexiones.push({
+      id: `cierre-${cambio.id_historial}`,
+      // El cierre institucional parte visualmente desde RADIO, que es el
+      // origen y destino final del circuito documental.
+      origen:
+        origenCierre ??
+        trazabilidad.documento.seccion_registro?.id_seccion ??
+        cambio.seccion.id_seccion,
+      destino: -cambio.id_historial,
+      retorno: false,
+      enTransito: false,
+      fase: "RETORNO",
+      cierre: true,
+    });
+    origenCierre = -cambio.id_historial;
+  }
+  return conexiones;
 }
 
 function etiquetaResultadoPlazo(resultado?: SituacionPlazoDocumental) {
@@ -355,17 +476,22 @@ function presentacionEtapa(etapa: Etapa) {
   };
 }
 
-function claseConector(etapa: Etapa) {
-  if (
-    etapa.detalle.estado.includes("OBSERV") ||
-    etapa.detalle.estado.includes("DEVOLUCIÓN")
-  ) {
-    return "bg-amber-400";
-  }
-  if (etapa.detalle.estado.includes("REENVÍO")) return "bg-indigo-400";
-  if (etapa.estado === "COMPLETADO") return "bg-emerald-500";
-  if (etapa.estado === "EN_TRANSITO") return "bg-sky-400";
-  return "bg-slate-200";
+function IconoFlechaDireccion() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className="size-6"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M4 12h15" />
+      <path d="m13 6 6 6-6 6" />
+    </svg>
+  );
 }
 
 function textoEtapa(etapa: Etapa) {
@@ -388,6 +514,46 @@ function fechaBreve(fecha?: string | null) {
   }).format(new Date(fecha));
 }
 
+function trazoConexion(
+  conexion: Conexion,
+  posiciones: Record<number, { x: number; y: number }>,
+) {
+  const origen = posiciones[conexion.origen];
+  const destino = posiciones[conexion.destino];
+  if (!origen || !destino) return null;
+  if (conexion.cierre) {
+    const margenNodo = 27;
+    if (Math.abs(origen.y - destino.y) < 8) {
+      const direccion = destino.x >= origen.x ? 1 : -1;
+      return `M ${origen.x + direccion * margenNodo} ${origen.y} H ${destino.x - direccion * margenNodo}`;
+    }
+    const direccion = destino.x >= origen.x ? 1 : -1;
+    // El primer tramo sale por el lado externo de RADIO y baja fuera de las
+    // etiquetas de la fila superior antes de dirigirse al cierre.
+    const codoX = origen.x - margenNodo - 24;
+    return `M ${origen.x - margenNodo} ${origen.y} H ${codoX} V ${destino.y} H ${destino.x - direccion * margenNodo}`;
+  }
+  const distancia = Math.hypot(destino.x - origen.x, destino.y - origen.y);
+  if (distancia === 0) return null;
+  // Evita que el trazo y su punta entren al círculo: ambos quedan limpios
+  // en el borde del nodo, incluso cuando la conexión es de retorno.
+  const margenNodo = 27;
+  const inicio = {
+    x: origen.x + ((destino.x - origen.x) / distancia) * margenNodo,
+    y: origen.y + ((destino.y - origen.y) / distancia) * margenNodo,
+  };
+  const curva = conexion.retorno
+    ? Math.max(origen.y, destino.y) + 30
+    : (origen.y + destino.y) / 2;
+  const control = { x: (origen.x + destino.x) / 2, y: curva };
+  const tramoFinal = Math.hypot(destino.x - control.x, destino.y - control.y);
+  const fin = {
+    x: destino.x - ((destino.x - control.x) / tramoFinal) * margenNodo,
+    y: destino.y - ((destino.y - control.y) / tramoFinal) * margenNodo,
+  };
+  return `M ${inicio.x} ${inicio.y} Q ${control.x} ${control.y} ${fin.x} ${fin.y}`;
+}
+
 export default function WorkflowVisual({
   trazabilidad,
 }: {
@@ -398,6 +564,7 @@ export default function WorkflowVisual({
     () => construirEtapas(trazabilidad, ahora),
     [trazabilidad, ahora],
   );
+  const conexiones = useMemo(() => construirConexiones(trazabilidad), [trazabilidad]);
   const indiceActual = Math.max(
     0,
     etapas.findIndex((etapa) =>
@@ -405,7 +572,10 @@ export default function WorkflowVisual({
     ),
   );
   const [seleccionada, setSeleccionada] = useState(indiceActual);
-  const [conectorAnimado, setConectorAnimado] = useState<number | null>(null);
+  const [conexionAnimada, setConexionAnimada] = useState<string | null>(null);
+  const [posiciones, setPosiciones] = useState<Record<number, { x: number; y: number }>>({});
+  const recorridoRef = useRef<HTMLOListElement | null>(null);
+  const nodoRefs = useRef(new Map<number, HTMLButtonElement>());
   const firmaMovimientoAnterior = useRef<string | null>(null);
   const etapa = etapas[seleccionada] ?? etapas[indiceActual];
 
@@ -413,6 +583,31 @@ export default function WorkflowVisual({
     const reloj = window.setInterval(() => setAhora(new Date()), 60_000);
     return () => window.clearInterval(reloj);
   }, []);
+
+  useEffect(() => {
+    const actualizarPosiciones = () => {
+      const recorrido = recorridoRef.current;
+      if (!recorrido) return;
+      const contenedor = recorrido.getBoundingClientRect();
+      const siguientes: Record<number, { x: number; y: number }> = {};
+      nodoRefs.current.forEach((nodo, idSeccion) => {
+        const rect = nodo.getBoundingClientRect();
+        siguientes[idSeccion] = {
+          x: rect.left - contenedor.left + rect.width / 2,
+          y: rect.top - contenedor.top + 24,
+        };
+      });
+      setPosiciones(siguientes);
+    };
+    actualizarPosiciones();
+    const observador = new ResizeObserver(actualizarPosiciones);
+    if (recorridoRef.current) observador.observe(recorridoRef.current);
+    window.addEventListener("resize", actualizarPosiciones);
+    return () => {
+      observador.disconnect();
+      window.removeEventListener("resize", actualizarPosiciones);
+    };
+  }, [etapas]);
 
   useEffect(() => {
     const movimiento = trazabilidad.expediente?.movimientos?.at(-1);
@@ -425,13 +620,9 @@ export default function WorkflowVisual({
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 
     const inicio = window.requestAnimationFrame(() => {
-      setConectorAnimado(
-        movimiento?.estado_movimiento === "PENDIENTE"
-          ? indiceActual
-          : Math.max(0, indiceActual - 1),
-      );
+      setConexionAnimada(movimiento ? `conexion-${movimiento.id_movimiento}` : null);
     });
-    const temporizador = window.setTimeout(() => setConectorAnimado(null), 950);
+    const temporizador = window.setTimeout(() => setConexionAnimada(null), 2400);
     return () => {
       window.cancelAnimationFrame(inicio);
       window.clearTimeout(temporizador);
@@ -467,19 +658,59 @@ export default function WorkflowVisual({
             <span className="text-amber-700">● Observado</span>
           </div>
         </div>
-        <ol className="flex flex-wrap justify-center gap-y-8">
+        <ol ref={recorridoRef} className="relative flex flex-wrap justify-center gap-y-8">
+          <svg
+            className="pointer-events-none absolute inset-0 size-full overflow-visible"
+            aria-hidden="true"
+          >
+            <defs>
+              <marker id="flecha-flujo" viewBox="0 0 12 12" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M1 1 11 6 1 11Z" fill="#10b981" />
+              </marker>
+              <marker id="flecha-transito" viewBox="0 0 12 12" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M1 1 11 6 1 11Z" fill="#38bdf8" />
+              </marker>
+              <marker id="flecha-retorno" viewBox="0 0 12 12" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="userSpaceOnUse">
+                <path d="M1 1 11 6 1 11Z" fill="#f59e0b" />
+              </marker>
+            </defs>
+            {conexiones.map((conexion) => {
+              const trazo = trazoConexion(conexion, posiciones);
+              if (!trazo) return null;
+              const color = conexion.retorno
+                ? "#f59e0b"
+                : conexion.enTransito
+                  ? "#38bdf8"
+                  : "#10b981";
+              return (
+                <g key={conexion.id}>
+                  <path
+                    d={trazo}
+                    fill="none"
+                    stroke={color}
+                    strokeWidth="4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    markerEnd={`url(#${conexion.retorno ? "flecha-retorno" : conexion.enTransito ? "flecha-transito" : "flecha-flujo"})`}
+                  />
+                  {conexionAnimada === conexion.id && (
+                    <circle r="6" fill="#1b4332">
+                      <animateMotion dur="2.4s" repeatCount="1" fill="freeze" path={trazo} />
+                    </circle>
+                  )}
+                </g>
+              );
+            })}
+          </svg>
           {etapas.map((item, indice) => {
             const presentacion = presentacionEtapa(item);
             return (
               <li key={item.id} className="relative flex w-36 justify-center sm:w-40">
-                {indice < etapas.length - 1 && (
-                  <span
-                    className={`absolute left-1/2 top-[23px] h-1 w-full ${claseConector(item)}`}
-                    aria-hidden="true"
-                  />
-                )}
                 <button
                   type="button"
+                  ref={(nodo) => {
+                    if (item.idSeccion && nodo) nodoRefs.current.set(item.idSeccion, nodo);
+                  }}
                   className={`group relative z-10 flex w-[8.5rem] flex-col items-center rounded-xl px-2 pb-2 pt-0 text-center transition sm:w-36 ${seleccionada === indice ? "bg-[#f0fff4] ring-2 ring-[#b7e4c7]" : "hover:bg-slate-50"}`}
                   onClick={() => setSeleccionada(indice)}
                   aria-label={`Ver detalle de ${item.nombre}`}
@@ -491,15 +722,13 @@ export default function WorkflowVisual({
                     <span
                       className={`relative flex size-12 items-center justify-center rounded-full border-2 text-lg font-bold transition ${presentacion.circulo}`}
                     >
-                      {presentacion.icono}
+                      {item.estado === "EN_TRANSITO" ? (
+                        <IconoFlechaDireccion />
+                      ) : (
+                        presentacion.icono
+                      )}
                     </span>
                   </span>
-                  {conectorAnimado === indice && (
-                    <span className="absolute right-3 top-3 flex size-3">
-                      <span className="absolute inline-flex size-full animate-ping rounded-full bg-[#2d6a4f] opacity-60" />
-                      <span className="relative inline-flex size-3 rounded-full bg-[#1b4332]" />
-                    </span>
-                  )}
                   <span
                     className={`mt-3 text-xs font-bold uppercase ${presentacion.texto}`}
                   >

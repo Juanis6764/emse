@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { NotificacionesDocumentalesService } from '../comun/notificaciones-documentales.service';
 import { DocumentacionGateway } from '../tiempo-real/documentacion.gateway';
+import { perteneceAVisitaActual } from './plazos.service';
 
 /**
  * No genera una notificación por minuto ni guarda un contador: solo
@@ -46,8 +47,9 @@ export class PlazosSchedulerService {
         },
       },
     });
+    const salidasPendientes = await this.ultimasSalidas(pendientesEncontrados);
     const pendientes = pendientesEncontrados.filter((plazo) =>
-      this.esPlazoActivo(plazo),
+      this.esPlazoActivo(plazo, salidasPendientes),
     );
 
     let avisos24h = 0;
@@ -81,8 +83,9 @@ export class PlazosSchedulerService {
         },
       },
     });
+    const salidasVencidos = await this.ultimasSalidas(vencidosEncontrados);
     const vencidos = vencidosEncontrados.filter((plazo) =>
-      this.esPlazoActivo(plazo),
+      this.esPlazoActivo(plazo, salidasVencidos),
     );
     for (const plazo of vencidos) {
       const idDocumento = plazo.proveido.hoja_ruta.id_documento;
@@ -99,17 +102,39 @@ export class PlazosSchedulerService {
     }
   }
 
+  private async ultimasSalidas(plazos: Array<{ proveido: { hoja_ruta: { id_documento: number } } }>) {
+    const ids = [...new Set(plazos.map((plazo) => plazo.proveido.hoja_ruta.id_documento))];
+    if (!ids.length) return new Map<string, Date>();
+    const movimientos = await this.prisma.movimientoDocumento.findMany({
+      where: { id_documento: { in: ids } },
+      select: { id_documento: true, id_seccion_origen: true, fecha_hora_envio: true },
+      orderBy: { fecha_hora_envio: 'desc' },
+    });
+    const salidas = new Map<string, Date>();
+    for (const movimiento of movimientos) {
+      const clave = `${movimiento.id_documento}:${movimiento.id_seccion_origen}`;
+      if (!salidas.has(clave)) salidas.set(clave, movimiento.fecha_hora_envio);
+    }
+    return salidas;
+  }
+
   private esPlazoActivo(plazo: {
     id_seccion_responsable: number;
     proveido: {
+      fecha_hora: Date;
       hoja_ruta: {
+        id_documento: number;
         expediente: { id_seccion_actual: number; estado_actual: string };
       };
     };
-  }) {
+  }, salidas = new Map<string, Date>()) {
     const expediente = plazo.proveido.hoja_ruta.expediente;
     return (
-      expediente.id_seccion_actual === plazo.id_seccion_responsable &&
+      perteneceAVisitaActual(
+        plazo,
+        expediente.id_seccion_actual,
+        salidas.get(`${plazo.proveido.hoja_ruta.id_documento}:${expediente.id_seccion_actual}`) ?? null,
+      ) &&
       !['FINALIZADO', 'ARCHIVADO'].includes(expediente.estado_actual)
     );
   }

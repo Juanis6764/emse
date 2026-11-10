@@ -6,8 +6,9 @@ import {
   PerfilDocumental,
   ValidacionesDocumentalesService,
 } from '../comun/validaciones-documentales.service';
-import { PlazosService } from '../plazos/plazos.service';
+import { perteneceAVisitaActual, PlazosService } from '../plazos/plazos.service';
 import { FiltrarReporteDto } from './dto/filtrar-reporte.dto';
+import { incidenciasDelRecorrido } from './incidencias-reporte';
 import {
   FiltrarSeguimientoDto,
   PestanaSeguimiento,
@@ -57,11 +58,25 @@ export class ReportesService {
       select: {
         id_documento: true,
         fecha_hora_registro: true,
-        expediente: { select: { estado_actual: true } },
+        expediente: {
+          select: { estado_actual: true, id_seccion_actual: true },
+        },
       },
     });
 
     const ids = documentos.map((documento) => documento.id_documento);
+    const salidas = ids.length
+      ? await this.prisma.movimientoDocumento.findMany({
+          where: { id_documento: { in: ids } },
+          select: { id_documento: true, id_seccion_origen: true, fecha_hora_envio: true },
+          orderBy: { fecha_hora_envio: 'desc' },
+        })
+      : [];
+    const ultimaSalida = new Map<string, Date>();
+    for (const salida of salidas) {
+      const clave = `${salida.id_documento}:${salida.id_seccion_origen}`;
+      if (!ultimaSalida.has(clave)) ultimaSalida.set(clave, salida.fecha_hora_envio);
+    }
     const plazosVencidos =
       ids.length === 0
         ? []
@@ -72,13 +87,34 @@ export class ReportesService {
               proveido: { hoja_ruta: { id_documento: { in: ids } } },
             },
             select: {
+              id_seccion_responsable: true,
               proveido: {
-                select: { hoja_ruta: { select: { id_documento: true } } },
+                select: { fecha_hora: true, hoja_ruta: { select: { id_documento: true } } },
               },
             },
           });
+    const seccionActualPorDocumento = new Map(
+      documentos.map((documento) => [
+        documento.id_documento,
+        documento.expediente?.id_seccion_actual ?? null,
+      ]),
+    );
+    // Un plazo histórico vencido no cambia el estado de la etapa actual.
     const idsVencidos = new Set(
-      plazosVencidos.map((plazo) => plazo.proveido.hoja_ruta.id_documento),
+      plazosVencidos
+        .filter(
+          (plazo) => {
+            const idDocumento = plazo.proveido.hoja_ruta.id_documento;
+            const idSeccion = seccionActualPorDocumento.get(idDocumento);
+            return idSeccion !== null && idSeccion !== undefined &&
+              perteneceAVisitaActual(
+                plazo,
+                idSeccion,
+                ultimaSalida.get(`${idDocumento}:${idSeccion}`) ?? null,
+              );
+          },
+        )
+        .map((plazo) => plazo.proveido.hoja_ruta.id_documento),
     );
 
     const porGestion = new Map<number, TotalesSeguimiento>();
@@ -316,9 +352,13 @@ export class ReportesService {
               take: 1,
             },
             observaciones: {
-              select: { subsanada: true, fecha_hora: true },
+              select: {
+                subsanada: true,
+                fecha_hora: true,
+                descripcion: true,
+                seccion: { select: { nombre: true } },
+              },
               orderBy: { fecha_hora: 'desc' },
-              take: 1,
             },
           },
         },
@@ -333,7 +373,7 @@ export class ReportesService {
           orderBy: { fecha_hora_limite: 'desc' },
           include: {
             proveido: {
-              select: { hoja_ruta: { select: { id_documento: true } } },
+              select: { fecha_hora: true, hoja_ruta: { select: { id_documento: true } } },
             },
           },
         })
@@ -354,7 +394,13 @@ export class ReportesService {
           (plazosPorDocumento.get(documento.id_documento) ?? [])
             .filter(
               (item) =>
-                item.id_seccion_responsable === expediente.id_seccion_actual,
+                perteneceAVisitaActual(
+                  item,
+                  expediente.id_seccion_actual,
+                  expediente.movimientos.find(
+                    (movimiento) => movimiento.id_seccion_origen === expediente.id_seccion_actual,
+                  )?.fecha_hora_envio ?? null,
+                ),
             )
             .sort(
               (a, b) =>
@@ -426,6 +472,21 @@ export class ReportesService {
             fecha_recepcion: movimiento.fecha_hora_recepcion,
             estado: movimiento.estado_movimiento,
           })),
+          recorrido_reporte: expediente.movimientos.map((movimiento) => ({
+            origen: movimiento.seccion_origen,
+            destino: movimiento.seccion_destino,
+            fecha_envio: movimiento.fecha_hora_envio,
+            fecha_recepcion: movimiento.fecha_hora_recepcion,
+            estado: movimiento.estado_movimiento,
+          })),
+          incidencias_reporte: incidenciasDelRecorrido(
+            expediente.movimientos,
+            plazosPorDocumento.get(documento.id_documento) ?? [],
+            expediente.observaciones,
+            expediente.id_seccion_actual,
+            new Date(),
+            !ESTADOS_CONCLUIDOS.includes(expediente.estado_actual),
+          ),
           estado_actual: expediente.estado_actual,
           seccion_actual: expediente.seccion_actual,
           responsable_actual: expediente.usuario_responsable_actual,

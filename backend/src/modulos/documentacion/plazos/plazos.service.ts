@@ -16,6 +16,18 @@ export type SituacionPlazoDocumental =
   | 'CUMPLIDO'
   | 'CUMPLIDO_TARDE';
 
+/** Un plazo de una visita anterior no vuelve a regir cuando el expediente retorna. */
+export function perteneceAVisitaActual(
+  plazo: { id_seccion_responsable: number; proveido: { fecha_hora: Date } },
+  idSeccionActual: number,
+  ultimaSalida: Date | null,
+): boolean {
+  return (
+    plazo.id_seccion_responsable === idSeccionActual &&
+    (!ultimaSalida || plazo.proveido.fecha_hora >= ultimaSalida)
+  );
+}
+
 /**
  * El estado del plazo NUNCA se almacena: se deriva en el momento a partir
  * de `fecha_hora_limite` + `fecha_hora_cumplimiento` + la hora actual (ver
@@ -79,10 +91,28 @@ export class PlazosService {
     });
     if (!expediente) return null;
 
+    // Si el documento ya salió de esta sección y luego volvió, un plazo
+    // creado para la visita anterior es histórico: no puede reactivarse solo
+    // porque coincida la misma sección responsable.
+    const ultimaSalida = await this.prisma.movimientoDocumento.findFirst({
+      where: {
+        id_documento: idDocumento,
+        id_seccion_origen: expediente.id_seccion_actual,
+      },
+      orderBy: { fecha_hora_envio: 'desc' },
+      select: { fecha_hora_envio: true },
+    });
+
     const plazo = await this.prisma.plazoDocumento.findFirst({
       where: {
         id_seccion_responsable: expediente.id_seccion_actual,
-        proveido: { hoja_ruta: { id_documento: idDocumento } },
+        fecha_hora_cumplimiento: null,
+        proveido: {
+          fecha_hora: ultimaSalida
+            ? { gte: ultimaSalida.fecha_hora_envio }
+            : undefined,
+          hoja_ruta: { id_documento: idDocumento },
+        },
       },
       orderBy: { fecha_hora_limite: 'desc' },
       include: { proveido: { select: { numero_momento: true } } },

@@ -8,7 +8,10 @@ export interface CambioPresencia {
 }
 
 // Debe ser la misma URL configurada para las solicitudes HTTP.
-const URL_API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3001";
+const URL_API = process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window === "undefined"
+    ? "http://localhost:3001"
+    : `${window.location.protocol}//${window.location.hostname}:3001`);
 let socket: Socket | null = null;
 let tokenActual: string | null = null;
 

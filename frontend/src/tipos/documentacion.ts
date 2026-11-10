@@ -293,6 +293,13 @@ export interface TarjetaSeguimientoDocumental {
     fecha_recepcion: string | null;
     estado: "PENDIENTE" | "RECIBIDO" | "CANCELADO";
   }>;
+  recorrido_reporte?: TarjetaSeguimientoDocumental['movimientos_area'];
+  incidencias_reporte?: Array<{
+    tipo: 'OBSERVACION' | 'RECEPCION_TARDIA' | 'DEMORA_DEPENDENCIA';
+    dependencia: string;
+    motivo: string;
+    fecha: string;
+  }>;
   estado_actual: EstadoDocumento;
   seccion_actual: SeccionResumen | null;
   responsable_actual?: PersonaResumen | null;
